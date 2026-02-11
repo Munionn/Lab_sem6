@@ -1,0 +1,39 @@
+services:
+  host1:
+    image: alpine:latest
+    container_name: host1
+    networks:
+      lab_net:
+        ipv4_address: 192.168.100.10
+    stdin_open: true
+    tty: true
+    command: ["sh", "-c", "echo 'Host1 ready. Use: ping 192.168.100.11 or ping host2'; sleep infinity"]
+
+  host2:
+    image: alpine:latest
+    container_name: host2
+    networks:
+      lab_net:
+        ipv4_address: 192.168.100.11
+    stdin_open: true
+    tty: true
+    command: ["sh", "-c", "echo 'Host2 ready.'; sleep infinity"]
+
+  host3:
+    image: alpine:latest
+    container_name: host3
+    networks:
+      lab_net:
+        ipv4_address: 192.168.100.12
+    stdin_open: true
+    tty: true
+    command: ["sh", "-c", "echo 'Host3 ready.'; sleep infinity"]
+
+networks:
+  lab_net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 192.168.100.0/24
+          gateway: 192.168.100.1
