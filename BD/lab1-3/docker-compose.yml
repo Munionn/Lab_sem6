@@ -1,0 +1,24 @@
+services:
+  oracle:
+    image: gvenzl/oracle-free:latest
+    platform: linux/amd64         
+    container_name: oracle-db
+    ports:
+      - "1521:1521"
+    environment:
+      ORACLE_PASSWORD: Oracle123   
+      APP_USER: labuser            
+      APP_USER_PASSWORD: labuser
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+      - .:/labs                    
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      start_period: 180s         
+
+volumes:
+  oracle-data:
+    driver: local
