@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-CONTAINER="oracle-db"
+CONTAINER="oracle-xe"
 DB_USER="labuser"
 DB_PASS="labuser"
 DB_SERVICE="FREEPDB1"
@@ -23,9 +23,7 @@ success() { echo -e "${GREEN}[OK]${NC}   $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()   { echo -e "${RED}[ERR]${NC}  $*"; exit 1; }
 
-# ============================================================
 # Ожидание готовности Oracle
-# ============================================================
 wait_for_oracle() {
     info "Ожидание готовности Oracle (может занять 3-5 минут при первом запуске)..."
     local attempts=0
@@ -49,9 +47,7 @@ wait_for_oracle() {
     error "Oracle не стал healthy за отведённое время. Проверьте: docker logs $CONTAINER"
 }
 
-# ============================================================
 # Выполнение SQL через sqlplus внутри контейнера
-# ============================================================
 run_sql() {
     local label="$1"
     local sql_file="$2"
@@ -71,9 +67,7 @@ SQL
     success "${label} выполнен."
 }
 
-# ============================================================
 # Команды
-# ============================================================
 cmd_start() {
     info "Запуск Oracle DB..."
     docker compose up -d
@@ -121,20 +115,12 @@ cmd_connect() {
     info "Открываю sqlplus сессию (labuser@FREEPDB1)..."
     echo "  Введите SQL или PL/SQL. Для выхода: EXIT"
     echo ""
-    docker exec -it "$CONTAINER" sqlplus "$CONN" <<< "SET SERVEROUTPUT ON SIZE UNLIMITED
-"
-    # Открываем интерактивный sqlplus
-    docker exec -it "$CONTAINER" bash -c "
-        echo 'SET SERVEROUTPUT ON SIZE UNLIMITED' > /tmp/profile.sql
-        sqlplus $CONN @/tmp/profile.sql
-    " || true
-    # Fallback — просто открыть sqlplus
     docker exec -it "$CONTAINER" sqlplus "$CONN"
 }
 
 cmd_connect_sys() {
     info "Открываю sqlplus сессию (SYSTEM)..."
-    docker exec -it "$CONTAINER" sqlplus "system/Oracle123@//localhost:1521/FREE"
+    docker exec -it "$CONTAINER" sqlplus "system/MyStrongPassw0rd@//localhost:1521/FREEPDB1"
 }
 
 cmd_lab1() {
@@ -149,7 +135,7 @@ cmd_lab3() {
     warn "Для lab3 нужны две схемы (DEV и PROD)."
     info "Создаю схему DEV_SCHEMA и PROD_SCHEMA..."
 
-    docker exec -i "$CONTAINER" sqlplus -S "system/Oracle123@//localhost:1521/FREE" <<SQL
+    docker exec -i "$CONTAINER" sqlplus -S "system/MyStrongPassw0rd@//localhost:1521/FREEPDB1" <<SQL
 SET SERVEROUTPUT ON SIZE UNLIMITED
 SET DEFINE OFF
 WHENEVER SQLERROR CONTINUE
@@ -196,7 +182,7 @@ cmd_reset() {
     warn "Сброс данных лабораторных (пересоздание пользователя labuser)..."
     read -rp "Вы уверены? (y/N): " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        docker exec -i "$CONTAINER" sqlplus -S "system/Oracle123@//localhost:1521/FREE" <<SQL
+        docker exec -i "$CONTAINER" sqlplus -S "system/MyStrongPassw0rd@//localhost:1521/FREEPDB1" <<SQL
 SET DEFINE OFF
 WHENEVER SQLERROR CONTINUE
 DROP USER labuser CASCADE;

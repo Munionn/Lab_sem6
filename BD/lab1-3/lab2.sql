@@ -39,23 +39,16 @@ BEGIN
 END trg_groups_autoinc;
 /
 
--- Проверка уникальности ID для GROUPS (дополнительная защита)
+-- Проверка уникальности ID для GROUPS (только при INSERT; PRIMARY KEY защищает UPDATE)
 CREATE OR REPLACE TRIGGER trg_groups_unique_id
-BEFORE INSERT OR UPDATE ON GROUPS
+BEFORE INSERT ON GROUPS
 FOR EACH ROW
 DECLARE
     v_count NUMBER;
 BEGIN
-    IF INSERTING THEN
-        SELECT COUNT(*) INTO v_count FROM GROUPS WHERE ID = :NEW.ID;
-        IF v_count > 0 THEN
-            RAISE_APPLICATION_ERROR(-20010, 'ID=' || :NEW.ID || ' уже существует в GROUPS.');
-        END IF;
-    ELSIF UPDATING THEN
-        SELECT COUNT(*) INTO v_count FROM GROUPS WHERE ID = :NEW.ID AND ID != :OLD.ID;
-        IF v_count > 0 THEN
-            RAISE_APPLICATION_ERROR(-20010, 'ID=' || :NEW.ID || ' уже существует в GROUPS.');
-        END IF;
+    SELECT COUNT(*) INTO v_count FROM GROUPS WHERE ID = :NEW.ID;
+    IF v_count > 0 THEN
+        RAISE_APPLICATION_ERROR(-20010, 'ID=' || :NEW.ID || ' уже существует в GROUPS.');
     END IF;
 END trg_groups_unique_id;
 /
@@ -90,23 +83,16 @@ BEGIN
 END trg_students_autoinc;
 /
 
--- Проверка уникальности ID для STUDENTS
+-- Проверка уникальности ID для STUDENTS (только при INSERT; PRIMARY KEY защищает UPDATE)
 CREATE OR REPLACE TRIGGER trg_students_unique_id
-BEFORE INSERT OR UPDATE ON STUDENTS
+BEFORE INSERT ON STUDENTS
 FOR EACH ROW
 DECLARE
     v_count NUMBER;
 BEGIN
-    IF INSERTING THEN
-        SELECT COUNT(*) INTO v_count FROM STUDENTS WHERE ID = :NEW.ID;
-        IF v_count > 0 THEN
-            RAISE_APPLICATION_ERROR(-20012, 'ID=' || :NEW.ID || ' уже существует в STUDENTS.');
-        END IF;
-    ELSIF UPDATING THEN
-        SELECT COUNT(*) INTO v_count FROM STUDENTS WHERE ID = :NEW.ID AND ID != :OLD.ID;
-        IF v_count > 0 THEN
-            RAISE_APPLICATION_ERROR(-20012, 'ID=' || :NEW.ID || ' уже существует в STUDENTS.');
-        END IF;
+    SELECT COUNT(*) INTO v_count FROM STUDENTS WHERE ID = :NEW.ID;
+    IF v_count > 0 THEN
+        RAISE_APPLICATION_ERROR(-20012, 'ID=' || :NEW.ID || ' уже существует в STUDENTS.');
     END IF;
 END trg_students_unique_id;
 /

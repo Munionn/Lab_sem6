@@ -5,8 +5,14 @@
 -- ============================================================
 -- Задание 1: Создание таблицы MyTable
 -- ============================================================
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE MyTable';
+EXCEPTION WHEN OTHERS THEN NULL;
+END;
+/
+
 CREATE TABLE MyTable (
-    id  NUMBER,
+    id  NUMBER PRIMARY KEY,
     val NUMBER
 );
 
