@@ -59,6 +59,10 @@ SET SERVEROUTPUT ON SIZE UNLIMITED
 SET DEFINE OFF
 SET FEEDBACK ON
 SET ECHO ON
+SET LINESIZE 200
+SET PAGESIZE 50000
+SET TRIMOUT ON
+SET TRIMSPOOL ON
 WHENEVER SQLERROR CONTINUE
 @/labs/${sql_file}
 EXIT
@@ -161,21 +165,43 @@ GRANT CONNECT, RESOURCE, CREATE VIEW TO prod_schema;
 GRANT SELECT ANY TABLE TO labuser;
 GRANT SELECT ANY DICTIONARY TO labuser;
 
+-- Тестовые данные: таблица в DEV и PROD с разной структурой
+CREATE TABLE dev_schema.products (
+    id       NUMBER PRIMARY KEY,
+    name     VARCHAR2(100) NOT NULL,
+    price    NUMBER(10,2),
+    category VARCHAR2(50)
+);
+CREATE TABLE prod_schema.products (
+    id    NUMBER PRIMARY KEY,
+    name  VARCHAR2(100) NOT NULL,
+    price NUMBER(10,2)
+);
+
+-- Таблица только в DEV (нет в PROD), с FK на products
+CREATE TABLE dev_schema.orders (
+    id         NUMBER PRIMARY KEY,
+    product_id NUMBER,
+    quantity   NUMBER,
+    CONSTRAINT fk_orders_prod FOREIGN KEY (product_id)
+        REFERENCES dev_schema.products(id)
+);
+
+-- Таблица только в PROD (лишняя, нет в DEV)
+CREATE TABLE prod_schema.legacy_log (
+    id      NUMBER PRIMARY KEY,
+    message VARCHAR2(500)
+);
+
+-- Процедура только в DEV
+CREATE OR REPLACE PROCEDURE dev_schema.get_product(p_id IN NUMBER) IS
+BEGIN NULL; END;
+/
+
 EXIT
 SQL
 
     run_sql "Лабораторная работа 3" "lab3.sql"
-
-    info "Тестовый вызов compare_schemas('DEV_SCHEMA', 'PROD_SCHEMA'):"
-    docker exec -i "$CONTAINER" sqlplus -S "$CONN" <<SQL
-SET SERVEROUTPUT ON SIZE UNLIMITED
-SET DEFINE OFF
-BEGIN
-    compare_schemas('DEV_SCHEMA', 'PROD_SCHEMA');
-END;
-/
-EXIT
-SQL
 }
 
 cmd_reset() {
@@ -185,6 +211,12 @@ cmd_reset() {
         docker exec -i "$CONTAINER" sqlplus -S "system/MyStrongPassw0rd@//localhost:1521/FREEPDB1" <<SQL
 SET DEFINE OFF
 WHENEVER SQLERROR CONTINUE
+BEGIN
+    FOR s IN (SELECT sid, serial# FROM v\$session WHERE username = 'LABUSER') LOOP
+        EXECUTE IMMEDIATE 'ALTER SYSTEM KILL SESSION ''' || s.sid || ',' || s.serial# || ''' IMMEDIATE';
+    END LOOP;
+END;
+/
 DROP USER labuser CASCADE;
 CREATE USER labuser IDENTIFIED BY labuser DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;
 GRANT CONNECT, RESOURCE, CREATE TABLE, CREATE PROCEDURE, CREATE SEQUENCE,

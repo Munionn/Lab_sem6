@@ -1,10 +1,6 @@
--- ============================================================
 -- Лабораторная работа 1: Простые процедуры и функции PL/SQL
--- ============================================================
 
--- ============================================================
 -- Задание 1: Создание таблицы MyTable
--- ============================================================
 BEGIN
     EXECUTE IMMEDIATE 'DROP TABLE MyTable';
 EXCEPTION WHEN OTHERS THEN NULL;
@@ -16,9 +12,7 @@ CREATE TABLE MyTable (
     val NUMBER
 );
 
--- ============================================================
 -- Задание 2: Анонимный блок — запись 10 000 случайных записей
--- ============================================================
 BEGIN
     FOR i IN 1..10000 LOOP
         INSERT INTO MyTable (id, val)
@@ -29,10 +23,8 @@ BEGIN
 END;
 /
 
--- ============================================================
 -- Задание 3: Функция сравнения количества чётных и нечётных val
 -- Возвращает VARCHAR2: 'TRUE', 'FALSE' или 'EQUAL'
--- ============================================================
 CREATE OR REPLACE FUNCTION check_even_odd
 RETURN VARCHAR2 IS
     v_even_count NUMBER := 0;
@@ -56,15 +48,23 @@ BEGIN
 END check_even_odd;
 /
 
--- Тест функции:
 BEGIN
-    DBMS_OUTPUT.PUT_LINE('Результат check_even_odd: ' || check_even_odd());
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('  РЕЗУЛЬТАТ: Чётные vs Нечётные значения val');
+    DECLARE
+        v_even NUMBER;
+        v_odd  NUMBER;
+    BEGIN
+        SELECT COUNT(*) INTO v_even FROM MyTable WHERE MOD(val, 2) = 0;
+        SELECT COUNT(*) INTO v_odd  FROM MyTable WHERE MOD(val, 2) != 0;
+        DBMS_OUTPUT.PUT_LINE('  Чётных  (val % 2 = 0): ' || v_even);
+        DBMS_OUTPUT.PUT_LINE('  Нечётных(val % 2 != 0): ' || v_odd);
+        DBMS_OUTPUT.PUT_LINE('  check_even_odd() => ' || check_even_odd());
+    END;
 END;
 /
 
--- ============================================================
 -- Задание 4: Функция генерации текста INSERT-команды по ID
--- ============================================================
 CREATE OR REPLACE FUNCTION generate_insert(p_id IN NUMBER)
 RETURN VARCHAR2 IS
     v_val  MyTable.val%TYPE;
@@ -89,16 +89,22 @@ END generate_insert;
 /
 
 -- Тест функции:
-DECLARE
-    v_result VARCHAR2(500);
 BEGIN
-    v_result := generate_insert(1);
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('  ТЕСТ: generate_insert(id)');
+    DECLARE
+        v_result VARCHAR2(500);
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('  id=1    => ' || generate_insert(1));
+        DBMS_OUTPUT.PUT_LINE('  id=500  => ' || generate_insert(500));
+        DBMS_OUTPUT.PUT_LINE('  id=9999 => ' || generate_insert(9999));
+        DBMS_OUTPUT.PUT_LINE('  id=99999 (не существует):');
+        v_result := generate_insert(99999);
+    END;
 END;
 /
 
--- ============================================================
 -- Задание 5: Процедуры DML (INSERT, UPDATE, DELETE)
--- ============================================================
 
 -- INSERT
 CREATE OR REPLACE PROCEDURE mytable_insert(
@@ -166,17 +172,57 @@ END mytable_delete;
 
 -- Тесты DML процедур:
 BEGIN
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('  ТЕСТ: Процедуры INSERT / UPDATE / DELETE');
+END;
+/
+
+-- Состояние ДО операций
+SELECT id, val FROM MyTable WHERE id = 10001;
+
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('>>> INSERT id=10001, val=42');
     mytable_insert(10001, 42);
+END;
+/
+
+-- Состояние ПОСЛЕ INSERT
+SELECT id, val FROM MyTable WHERE id = 10001;
+
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('>>> UPDATE id=10001: val=42 -> val=99');
     mytable_update(10001, 99);
+END;
+/
+
+-- Состояние ПОСЛЕ UPDATE
+SELECT id, val FROM MyTable WHERE id = 10001;
+
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('>>> DELETE id=10001');
     mytable_delete(10001);
 END;
 /
 
--- ============================================================
+-- Состояние ПОСЛЕ DELETE (ожидается 0 строк)
+SELECT id, val FROM MyTable WHERE id = 10001;
+
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('>>> Попытка UPDATE несуществующей записи (id=10001):');
+    mytable_update(10001, 55);
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('>>> Попытка INSERT дубликата (id=1):');
+    mytable_insert(1, 777);
+END;
+/
+
 -- Задание 6: Функция расчёта годового вознаграждения
 -- Аргументы: месячная зарплата (NUMBER), процент премии (INTEGER)
 -- Формула: (1 + процент/100) * 12 * зарплата
--- ============================================================
 CREATE OR REPLACE FUNCTION calc_annual_reward(
     p_monthly_salary IN NUMBER,
     p_bonus_percent  IN INTEGER
@@ -197,10 +243,8 @@ BEGIN
         RAISE_APPLICATION_ERROR(-20003, 'Процент премиальных должен быть в диапазоне 0–10000.');
     END IF;
 
-    -- Преобразование целого процента к дробному коэффициенту
     v_bonus_rate := p_bonus_percent / 100.0;
 
-    -- Расчёт годового вознаграждения
     v_result := (1 + v_bonus_rate) * 12 * p_monthly_salary;
 
     RETURN v_result;
@@ -215,21 +259,25 @@ END calc_annual_reward;
 
 -- Тесты функции:
 BEGIN
-    -- Нормальный случай: зарплата 5000, премия 20%
-    DBMS_OUTPUT.PUT_LINE('Годовое вознаграждение (5000, 20%): ' ||
-        TO_CHAR(calc_annual_reward(5000, 20)));
-
-    -- Нулевая премия
-    DBMS_OUTPUT.PUT_LINE('Годовое вознаграждение (3000, 0%): ' ||
-        TO_CHAR(calc_annual_reward(3000, 0)));
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('  ТЕСТ: calc_annual_reward(зарплата, %премии)');
+    DBMS_OUTPUT.PUT_LINE('  Формула: (1 + процент/100) * 12 * зарплата');
+    DBMS_OUTPUT.PUT_LINE('  5000 руб/мес, премия 20% => ' ||
+        TO_CHAR(calc_annual_reward(5000, 20)) || ' руб/год');
+    DBMS_OUTPUT.PUT_LINE('  3000 руб/мес, премия  0% => ' ||
+        TO_CHAR(calc_annual_reward(3000, 0))  || ' руб/год');
+    DBMS_OUTPUT.PUT_LINE('  1000 руб/мес, премия 50% => ' ||
+        TO_CHAR(calc_annual_reward(1000, 50)) || ' руб/год');
 END;
 /
 
--- Тест с некорректными данными:
 BEGIN
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('  Тест обработки ошибок:');
+    DBMS_OUTPUT.PUT_LINE('  calc_annual_reward(-100, 10) — отрицательная зарплата:');
     DBMS_OUTPUT.PUT_LINE(TO_CHAR(calc_annual_reward(-100, 10)));
 EXCEPTION
     WHEN OTHERS THEN
-        DBMS_OUTPUT.PUT_LINE('Ожидаемая ошибка: ' || SQLERRM);
+        DBMS_OUTPUT.PUT_LINE('  [ОЖИДАЕМАЯ ОШИБКА] ' || SQLERRM);
 END;
 /

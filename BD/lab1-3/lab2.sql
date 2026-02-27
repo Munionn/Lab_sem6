@@ -1,10 +1,27 @@
--- ============================================================
 -- Лабораторная работа 2: Триггеры
--- ============================================================
 
--- ============================================================
+BEGIN
+    FOR t IN (SELECT trigger_name FROM user_triggers
+              WHERE trigger_name IN (
+                  'TRG_UPDATE_GROUP_CVAL','TRG_STUDENTS_AUDIT',
+                  'TRG_STUDENTS_FK_CHECK','TRG_STUDENTS_UNIQUE_ID',
+                  'TRG_STUDENTS_AUTOINC','TRG_GROUPS_CASCADE_DELETE',
+                  'TRG_GROUPS_UNIQUE_NAME','TRG_GROUPS_UNIQUE_ID',
+                  'TRG_GROUPS_AUTOINC')) LOOP
+        EXECUTE IMMEDIATE 'DROP TRIGGER ' || t.trigger_name;
+    END LOOP;
+    FOR tb IN (SELECT table_name FROM user_tables
+               WHERE table_name IN ('STUDENTS_LOG','STUDENTS','GROUPS')) LOOP
+        EXECUTE IMMEDIATE 'DROP TABLE ' || tb.table_name || ' CASCADE CONSTRAINTS';
+    END LOOP;
+    FOR sq IN (SELECT sequence_name FROM user_sequences
+               WHERE sequence_name IN ('SEQ_GROUPS_ID','SEQ_STUDENTS_ID')) LOOP
+        EXECUTE IMMEDIATE 'DROP SEQUENCE ' || sq.sequence_name;
+    END LOOP;
+END;
+/
+
 -- Задание 1: Создание таблиц STUDENTS и GROUPS
--- ============================================================
 CREATE TABLE GROUPS (
     ID     NUMBER       NOT NULL,
     NAME   VARCHAR2(50) NOT NULL,
@@ -23,10 +40,8 @@ CREATE TABLE STUDENTS (
 CREATE SEQUENCE SEQ_GROUPS_ID  START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
 CREATE SEQUENCE SEQ_STUDENTS_ID START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
 
--- ============================================================
 -- Задание 2: Триггеры — уникальность ID, автоинкремент,
 --            уникальность GROUPS.NAME
--- ============================================================
 
 -- Автоинкремент ID для GROUPS
 CREATE OR REPLACE TRIGGER trg_groups_autoinc
@@ -97,12 +112,9 @@ BEGIN
 END trg_students_unique_id;
 /
 
--- ============================================================
 -- Задание 3: Триггер Foreign Key с каскадным удалением
 -- STUDENTS -> GROUPS (при удалении группы удаляются студенты)
--- ============================================================
 
--- Проверка FK при INSERT/UPDATE в STUDENTS: GROUP_ID должен существовать
 CREATE OR REPLACE TRIGGER trg_students_fk_check
 BEFORE INSERT OR UPDATE OF GROUP_ID ON STUDENTS
 FOR EACH ROW
@@ -127,14 +139,12 @@ BEGIN
 END trg_groups_cascade_delete;
 /
 
--- ============================================================
 -- Задание 4: Триггер журналирования действий над STUDENTS
--- ============================================================
 
 -- Таблица журнала
 CREATE TABLE STUDENTS_LOG (
     LOG_ID      NUMBER GENERATED ALWAYS AS IDENTITY,
-    OPERATION   VARCHAR2(10)  NOT NULL,  -- INSERT / UPDATE / DELETE
+    OPERATION   VARCHAR2(10)  NOT NULL, 
     STUDENT_ID  NUMBER,
     OLD_NAME    VARCHAR2(100),
     NEW_NAME    VARCHAR2(100),
@@ -170,13 +180,11 @@ BEGIN
 END trg_students_audit;
 /
 
--- ============================================================
 -- Задание 5: Процедура восстановления данных STUDENTS
 -- по указанному временному моменту или смещению
--- ============================================================
 CREATE OR REPLACE PROCEDURE restore_students(
-    p_target_time    IN TIMESTAMP DEFAULT NULL,  -- конкретный момент
-    p_offset_minutes IN NUMBER    DEFAULT NULL   -- смещение в минутах назад
+    p_target_time    IN TIMESTAMP DEFAULT NULL,  
+    p_offset_minutes IN NUMBER    DEFAULT NULL   
 ) IS
     v_restore_time TIMESTAMP;
     v_count_deleted  NUMBER := 0;
@@ -219,7 +227,6 @@ BEGIN
             v_last_grp  NUMBER;
             v_log_time  TIMESTAMP;
         BEGIN
-            -- Берём последнюю операцию для данного студента
             SELECT OPERATION, NEW_NAME, NEW_GROUP, CHANGED_AT
             INTO v_last_op, v_last_name, v_last_grp, v_log_time
             FROM STUDENTS_LOG
@@ -239,7 +246,7 @@ BEGIN
             END IF;
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
-                NULL; -- пропускаем
+                NULL; 
         END;
     END LOOP;
 
@@ -259,22 +266,18 @@ EXCEPTION
 END restore_students;
 /
 
--- ============================================================
 -- Задание 6: Триггер обновления C_VAL в GROUPS
 -- при изменении данных в STUDENTS
--- ============================================================
 CREATE OR REPLACE TRIGGER trg_update_group_cval
 AFTER INSERT OR UPDATE OF GROUP_ID OR DELETE ON STUDENTS
 FOR EACH ROW
 BEGIN
     IF INSERTING THEN
-        -- Увеличиваем счётчик для новой группы
         UPDATE GROUPS
         SET C_VAL = C_VAL + 1
         WHERE ID = :NEW.GROUP_ID;
 
     ELSIF DELETING THEN
-        -- Уменьшаем счётчик группы удалённого студента
         UPDATE GROUPS
         SET C_VAL = GREATEST(C_VAL - 1, 0)
         WHERE ID = :OLD.GROUP_ID;
@@ -295,27 +298,184 @@ END trg_update_group_cval;
 /
 
 -- ============================================================
--- Тестовые данные
+-- ТЕСТИРОВАНИЕ ТРИГГЕРОВ
 -- ============================================================
+
+-- ------------------------------------------------------------
+-- Триггер: trg_groups_autoinc  (автоинкремент ID у GROUPS)
+-- Триггер: trg_groups_unique_name (уникальность NAME у GROUPS)
+-- ------------------------------------------------------------
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_groups_autoinc');
+    DBMS_OUTPUT.PUT_LINE('  INSERT без указания ID — ID назначается автоматически');
+END;
+/
 INSERT INTO GROUPS (NAME, C_VAL) VALUES ('ПМ-21', 0);
 INSERT INTO GROUPS (NAME, C_VAL) VALUES ('ПМ-22', 0);
 
+-- Показываем назначенные ID
+SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
+
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_groups_unique_name');
+    DBMS_OUTPUT.PUT_LINE('  Попытка вставить дубликат имени "ПМ-21":');
+    INSERT INTO GROUPS (NAME) VALUES ('ПМ-21');
+EXCEPTION
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE('  [ОЖИДАЕМАЯ ОШИБКА] ' || SQLERRM);
+END;
+/
+
+-- ------------------------------------------------------------
+-- Триггер: trg_students_autoinc  (автоинкремент ID у STUDENTS)
+-- Триггер: trg_students_fk_check (FK: GROUP_ID должен существовать)
+-- Триггер: trg_update_group_cval (C_VAL обновляется при INSERT)
+-- ------------------------------------------------------------
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_students_autoinc + trg_update_group_cval');
+    DBMS_OUTPUT.PUT_LINE('  Добавляем студентов — C_VAL в GROUPS должен расти');
+    DBMS_OUTPUT.PUT_LINE('  C_VAL до добавления студентов:');
+END;
+/
+SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
+
 INSERT INTO STUDENTS (NAME, GROUP_ID) VALUES ('Иванов Иван', 1);
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('  [trg_update_group_cval] INSERT Иванов Иван -> ПМ-21');
+    DBMS_OUTPUT.PUT_LINE('  C_VAL после добавления Иванов Иван:');
+END;
+/
+SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
+
 INSERT INTO STUDENTS (NAME, GROUP_ID) VALUES ('Петров Пётр', 1);
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('  [trg_update_group_cval] INSERT Петров Пётр -> ПМ-21');
+    DBMS_OUTPUT.PUT_LINE('  C_VAL после добавления Петров Пётр:');
+END;
+/
+SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
+
 INSERT INTO STUDENTS (NAME, GROUP_ID) VALUES ('Сидоров Семён', 2);
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('  [trg_update_group_cval] INSERT Сидоров Семён -> ПМ-22');
+    DBMS_OUTPUT.PUT_LINE('  C_VAL после добавления Сидоров Семён:');
+END;
+/
+SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
 
--- Проверка C_VAL
-SELECT G.NAME, G.C_VAL FROM GROUPS G;
+-- Таблица студентов
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('  Итоговый список студентов (ID назначены автоматически):');
+END;
+/
+SELECT S.ID, S.NAME, S.GROUP_ID, G.NAME AS GROUP_NAME
+FROM STUDENTS S
+JOIN GROUPS G ON S.GROUP_ID = G.ID
+ORDER BY S.ID;
 
--- Перевод студента
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_students_fk_check');
+    DBMS_OUTPUT.PUT_LINE('  Попытка добавить студента в несуществующую группу ID=99:');
+    INSERT INTO STUDENTS (NAME, GROUP_ID) VALUES ('Тестов Тест', 99);
+EXCEPTION
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE('  [ОЖИДАЕМАЯ ОШИБКА] ' || SQLERRM);
+END;
+/
+
+-- ------------------------------------------------------------
+-- Триггер: trg_update_group_cval при UPDATE (смена группы)
+-- Триггер: trg_students_audit (журнал)
+-- ------------------------------------------------------------
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_update_group_cval при UPDATE GROUP_ID');
+    DBMS_OUTPUT.PUT_LINE('  Переводим Иванов Иван из ПМ-21 (ID=1) в ПМ-22 (ID=2)');
+    DBMS_OUTPUT.PUT_LINE('  C_VAL ДО перевода: ПМ-21 должна быть 2, ПМ-22 = 1');
+END;
+/
 UPDATE STUDENTS SET GROUP_ID = 2 WHERE NAME = 'Иванов Иван';
-SELECT G.NAME, G.C_VAL FROM GROUPS G;
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('  [trg_update_group_cval] ПМ-21.C_VAL -= 1, ПМ-22.C_VAL += 1');
+    DBMS_OUTPUT.PUT_LINE('  C_VAL ПОСЛЕ перевода:');
+END;
+/
+SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
 
--- Удаление студента
+-- ------------------------------------------------------------
+-- Триггер: trg_update_group_cval при DELETE
+-- ------------------------------------------------------------
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_update_group_cval при DELETE');
+    DBMS_OUTPUT.PUT_LINE('  Удаляем Петров Пётр из ПМ-21');
+    DBMS_OUTPUT.PUT_LINE('  C_VAL ДО удаления:');
+END;
+/
 DELETE FROM STUDENTS WHERE NAME = 'Петров Пётр';
-SELECT G.NAME, G.C_VAL FROM GROUPS G;
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('  [trg_update_group_cval] ПМ-21.C_VAL -= 1');
+    DBMS_OUTPUT.PUT_LINE('  C_VAL ПОСЛЕ удаления:');
+END;
+/
+SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
 
--- Журнал
-SELECT * FROM STUDENTS_LOG ORDER BY LOG_ID;
+-- ------------------------------------------------------------
+-- Журнал аудита (trg_students_audit)
+-- ------------------------------------------------------------
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_students_audit — журнал всех операций');
+END;
+/
+SELECT
+    LOG_ID,
+    OPERATION,
+    STUDENT_ID,
+    OLD_NAME,
+    NEW_NAME,
+    OLD_GROUP,
+    NEW_GROUP,
+    TO_CHAR(CHANGED_AT,'HH24:MI:SS') AS AT_TIME
+FROM STUDENTS_LOG
+ORDER BY LOG_ID;
+
+-- ------------------------------------------------------------
+-- Триггер: trg_groups_cascade_delete
+-- ------------------------------------------------------------
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('');
+    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_groups_cascade_delete');
+    DBMS_OUTPUT.PUT_LINE('  Удаляем группу ПМ-22 — студенты должны удалиться каскадно');
+    DBMS_OUTPUT.PUT_LINE('  Студенты ПМ-22 ДО удаления группы:');
+END;
+/
+SELECT S.ID, S.NAME FROM STUDENTS S WHERE S.GROUP_ID = 2;
+DELETE FROM GROUPS WHERE NAME = 'ПМ-22';
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('  Студенты ПОСЛЕ удаления группы ПМ-22 (ожидается 0 строк):');
+END;
+/
+SELECT S.ID, S.NAME FROM STUDENTS S WHERE S.GROUP_ID = 2;
+
+-- Итоговый журнал (включая удалённых при каскаде)
+BEGIN
+    DBMS_OUTPUT.PUT_LINE('  Итоговый журнал (включая каскадные DELETE):');
+END;
+/
+SELECT
+    LOG_ID,
+    OPERATION,
+    STUDENT_ID,
+    NVL(OLD_NAME, NEW_NAME) AS NAME,
+    OLD_GROUP,
+    NEW_GROUP,
+    TO_CHAR(CHANGED_AT,'HH24:MI:SS') AS AT_TIME
+FROM STUDENTS_LOG
+ORDER BY LOG_ID;
 
 COMMIT;
