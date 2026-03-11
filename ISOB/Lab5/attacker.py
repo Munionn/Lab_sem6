@@ -45,9 +45,6 @@ def send_cmd(s: socket.socket, cmd: str) -> str:
 SEP = "=" * 55
 
 
-# ---------------------------------------------------------------------------
-# Атака 1: нормальный ввод (baseline)
-# ---------------------------------------------------------------------------
 
 def attack_normal():
     print(f"\n{SEP}")
@@ -64,9 +61,6 @@ def attack_normal():
     s.close()
 
 
-# ---------------------------------------------------------------------------
-# Атака 2: переполнение буфера (данные > 16 байт)
-# ---------------------------------------------------------------------------
 
 def attack_overflow():
     print(f"\n{SEP}")
@@ -82,16 +76,12 @@ def attack_overflow():
     s.close()
 
 
-# ---------------------------------------------------------------------------
-# Атака 3: попытка затереть канарейку
-# ---------------------------------------------------------------------------
 
 def attack_canary():
     print(f"\n{SEP}")
     print("  АТАКА 3: Попытка затереть stack canary")
     print(SEP)
     s = connect()
-    # 16 байт буфера + 4 байта нулей (затираем канарейку) + флаг админа
     payload_bytes = b"A" * 16 + b"\x00" * 4 + b"\x01"
     payload_str   = payload_bytes.decode("latin-1")
     resp = send_cmd(s, f"STORE {payload_str}")
@@ -102,16 +92,12 @@ def attack_canary():
     s.close()
 
 
-# ---------------------------------------------------------------------------
-# Атака 4: shell-код (NOP-sled + фейковый payload)
-# ---------------------------------------------------------------------------
 
 def attack_shellcode():
     print(f"\n{SEP}")
     print("  АТАКА 4: Попытка записи shell-кода (NOP-sled)")
     print(SEP)
     s = connect()
-    # NOP-sled (0x90) + фейковый адрес возврата
     nop_sled    = b"\x90" * 20
     fake_ret    = b"\xbe\xba\xfe\xca\xff\xff\x7f\x00"
     payload     = nop_sled + fake_ret
@@ -124,9 +110,6 @@ def attack_shellcode():
     s.close()
 
 
-# ---------------------------------------------------------------------------
-# Атака 5: off-by-one (ровно на 1 байт больше)
-# ---------------------------------------------------------------------------
 
 def attack_off_by_one():
     print(f"\n{SEP}")
@@ -134,12 +117,10 @@ def attack_off_by_one():
     print(SEP)
     s = connect()
 
-    # Ровно по границе — должно пройти
     ok_payload = "B" * 16
     resp = send_cmd(s, f"STORE {ok_payload}")
     print(f"  STORE 'B'×16 (16 б) → {resp}")
 
-    # На 1 больше — должно быть отклонено
     bad_payload = "C" * 17
     resp = send_cmd(s, f"STORE {bad_payload}")
     print(f"  STORE 'C'×17 (17 б) → {resp}")
@@ -148,9 +129,6 @@ def attack_off_by_one():
     s.close()
 
 
-# ---------------------------------------------------------------------------
-# Атака 6: огромный сетевой пакет (атака на сам recv)
-# ---------------------------------------------------------------------------
 
 def attack_huge_packet():
     print(f"\n{SEP}")
@@ -171,24 +149,12 @@ def attack_huge_packet():
         print(f"  [ERROR] {e}")
 
 
-# ---------------------------------------------------------------------------
-# Атака 7: Cyclic pattern — поиск смещения до адреса возврата
-# ---------------------------------------------------------------------------
-
 def attack_cyclic_pattern():
-    """
-    Классический метод из реальных эксплойтов.
-    Генерируем циклический паттерн вида 'AAABAAACAAaD...' —
-    каждые 4 байта уникальны, поэтому по значению, оказавшемуся в ret-addr,
-    можно точно вычислить смещение (offset) до адреса возврата.
-    Здесь демонстрируем генерацию паттерна и попытку его записи.
-    """
     print(f"\n{SEP}")
     print("  АТАКА 7: Cyclic pattern (определение смещения)")
     print(SEP)
 
     def cyclic(length: int) -> bytes:
-        """Генератор циклического паттерна (de Bruijn sequence)."""
         charset = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
         pattern = bytearray()
         i = 0
@@ -198,24 +164,19 @@ def attack_cyclic_pattern():
         return bytes(pattern)
 
     def cyclic_find(pattern: bytes, needle: bytes) -> int:
-        """Найти смещение подпоследовательности в паттерне."""
         idx = pattern.find(needle)
         return idx
 
-    # Генерируем паттерн длиной 40 байт (буфер + служебные данные)
     pattern = cyclic(40)
     print(f"  Cyclic pattern (40 б): {pattern.decode('latin-1')}")
     print(f"  Hex: {pattern.hex()}")
 
-    # Имитация: атакующий смотрит какие 4 байта оказались в ret-addr
-    # (в реальности это значение читается из регистра EIP после краша)
     simulated_ret = pattern[20:24]
     offset = cyclic_find(pattern, simulated_ret)
     print(f"\n  Симуляция краша: ret-addr содержит {simulated_ret.hex()}")
     print(f"  cyclic_find → смещение до ret-addr = {offset} байт")
     print(f"  Вывод: нужно {offset} байт мусора, затем адрес evil-функции")
 
-    # Пробуем отправить на сервер
     s = connect()
     payload_str = pattern.decode("latin-1")
     resp = send_cmd(s, f"STORE {payload_str}")
@@ -224,17 +185,8 @@ def attack_cyclic_pattern():
     s.close()
 
 
-# ---------------------------------------------------------------------------
-# Атака 8: Null-byte инъекция
-# ---------------------------------------------------------------------------
 
 def attack_null_byte():
-    """
-    Внедряем нулевые байты (\x00) в данные.
-    В C строки завершаются нулём — strcpy/strlen остановятся на \x00,
-    что позволяет скрыть часть payload от проверок.
-    Здесь проверяем, корректно ли сервер обрабатывает нулевые байты.
-    """
     print(f"\n{SEP}")
     print("  АТАКА 8: Null-byte инъекция")
     print(SEP)
@@ -254,23 +206,10 @@ def attack_null_byte():
     send_cmd(s, "QUIT")
     s.close()
 
-
-# ---------------------------------------------------------------------------
-# Атака 9: Integer overflow в размере
-# ---------------------------------------------------------------------------
-
 def attack_integer_overflow():
-    """
-    В C функции типа malloc(size) принимают size_t (беззнаковый).
-    Если size вычисляется как int и переполняется (становится отрицательным),
-    malloc(0xFFFF0000) выделит очень мало памяти, а потом туда запишут много данных.
-    Здесь имитируем: посылаем граничные значения размеров.
-    """
     print(f"\n{SEP}")
     print("  АТАКА 9: Integer overflow (граничные размеры)")
     print(SEP)
-
-    # Граничные значения, интересные с точки зрения integer overflow
     sizes = [
         (0,       "пустые данные (0 байт)"),
         (1,       "минимальные данные"),
@@ -294,22 +233,12 @@ def attack_integer_overflow():
     s.close()
 
 
-# ---------------------------------------------------------------------------
-# Атака 10: ROP-цепочка (Return-Oriented Programming)
-# ---------------------------------------------------------------------------
 
 def attack_rop_chain():
-    """
-    ROP (Return-Oriented Programming) — современная техника обхода NX/DEP.
-    Вместо вставки shell-кода атакующий собирает цепочку из адресов
-    уже существующих «гаджетов» (фрагментов кода, оканчивающихся на RET).
-    Здесь имитируем: payload состоит исключительно из адресов (8 байт каждый).
-    """
     print(f"\n{SEP}")
     print("  АТАКА 10: ROP-цепочка (Return-Oriented Programming)")
     print(SEP)
 
-    # Имитация адресов «гаджетов» из стандартной библиотеки
     gadgets = [
         (0x00007F_AB12_3410, "pop rdi; ret"),
         (0x00007F_AB12_3418, "/bin/sh (строка в libc)"),
@@ -327,8 +256,7 @@ def attack_rop_chain():
         rop_chain += packed
         print(f"    0x{addr:016X}  ← {desc}")
 
-    # Payload: мусор до ret-addr + ROP-цепочка
-    padding   = b"A" * 16           # заполняем буфер
+    padding   = b"A" * 16 
     full_payload = padding + rop_chain
     print(f"\n  Полный payload: {len(padding)} б мусора + {len(rop_chain)} б ROP = {len(full_payload)} б")
     print(f"  Hex: {full_payload.hex()}")
@@ -342,10 +270,6 @@ def attack_rop_chain():
     send_cmd(s, "QUIT")
     s.close()
 
-
-# ---------------------------------------------------------------------------
-# Меню
-# ---------------------------------------------------------------------------
 
 ATTACKS = {
     "1":  ("Нормальный ввод (baseline)",        attack_normal),
