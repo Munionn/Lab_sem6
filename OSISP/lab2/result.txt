@@ -1,0 +1,5 @@
+First sentence in the file. Second sentence after a period.
+After a period and newline comes another sentence.
+Numbers like 3.14 and 2.5 should not change the next letter.
+Exclamation! And question? Also start a sentence.
+  Several spaces after a period   and again text.
