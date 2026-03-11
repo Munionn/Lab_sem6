@@ -1,9 +1,3 @@
-"""
-Легитимный клиент для демонстрации работы защищённого сервера.
-
-Использование:
-    python client.py
-"""
 
 import socket
 
@@ -26,15 +20,12 @@ def main():
         banner = s.recv(4096).decode().strip()
         print(f"Сервер: {banner}")
 
-        # Попытка выполнить команду без авторизации
         resp = send(s, "PING")
         print(f"PING (без авторизации): {resp}")
 
-        # Авторизация
         resp = send(s, "LOGIN admin secret123")
         print(f"LOGIN admin: {resp}")
 
-        # Команды после авторизации
         resp = send(s, "PING")
         print(f"PING: {resp}")
 
