@@ -1,7 +1,9 @@
 -- Лабораторная работа 3: Работа со схемами данных
 
 -- Задание 1: Сравнение таблиц между схемами Dev и Prod
--- Учитываются FK-зависимости (топологическая сортировка)
+-- Топологическая сортировка (алгоритм Кана): порядок вывода таблиц по FK —
+-- сначала родительские (на которые ссылаются), потом дочерние (с FK).
+-- Такой же порядок используется при генерации DDL, чтобы CREATE TABLE не падал из-за FK.
 CREATE OR REPLACE PROCEDURE compare_schemas(
     p_dev_schema  IN VARCHAR2,
     p_prod_schema IN VARCHAR2
@@ -377,7 +379,7 @@ CREATE OR REPLACE PROCEDURE generate_sync_ddl(
         DBMS_OUTPUT.PUT_LINE(p_text);
     END;
 
-    -- Получить DDL объекта через DBMS_METADATA
+    -- Получить DDL объекта через DBMS_METADATA (из схемы p_schema)
     FUNCTION get_ddl_safe(p_type IN VARCHAR2, p_name IN VARCHAR2, p_schema IN VARCHAR2)
     RETURN CLOB IS
         v_result CLOB;
@@ -399,6 +401,77 @@ CREATE OR REPLACE PROCEDURE generate_sync_ddl(
                    || ': ' || SQLERRM || CHR(10);
     END get_ddl_safe;
 
+    -- Резервная генерация CREATE TABLE по словарю (если GET_DDL недоступен из другой схемы)
+    FUNCTION build_create_table_ddl(p_table IN VARCHAR2, p_schema IN VARCHAR2)
+    RETURN CLOB IS
+        v_ddl CLOB := 'CREATE TABLE ' || p_schema || '.' || p_table || ' (' || CHR(10);
+        v_first BOOLEAN := TRUE;
+        v_pk_cols VARCHAR2(4000);
+    BEGIN
+        FOR col IN (
+            SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE, DATA_DEFAULT
+            FROM ALL_TAB_COLUMNS
+            WHERE OWNER = p_schema AND TABLE_NAME = p_table
+            ORDER BY COLUMN_ID
+        ) LOOP
+            IF NOT v_first THEN v_ddl := v_ddl || ',' || CHR(10); END IF;
+            v_ddl := v_ddl || '  ' || col.COLUMN_NAME || ' ' || col.DATA_TYPE;
+            IF col.DATA_TYPE IN ('VARCHAR2','CHAR','NVARCHAR2','NCHAR') THEN
+                v_ddl := v_ddl || '(' || col.DATA_LENGTH || ')';
+            ELSIF col.DATA_TYPE = 'NUMBER' AND (col.DATA_PRECISION IS NOT NULL OR col.DATA_SCALE IS NOT NULL) THEN
+                IF col.DATA_PRECISION IS NOT NULL THEN
+                    v_ddl := v_ddl || '(' || col.DATA_PRECISION;
+                    IF col.DATA_SCALE IS NOT NULL THEN v_ddl := v_ddl || ',' || col.DATA_SCALE; END IF;
+                    v_ddl := v_ddl || ')';
+                END IF;
+            END IF;
+            IF col.NULLABLE = 'N' THEN v_ddl := v_ddl || ' NOT NULL'; END IF;
+            IF col.DATA_DEFAULT IS NOT NULL THEN
+                v_ddl := v_ddl || ' DEFAULT ' || TRIM(col.DATA_DEFAULT);
+            END IF;
+            v_first := FALSE;
+        END LOOP;
+        -- PK
+        FOR c IN (
+            SELECT cc.COLUMN_NAME
+            FROM ALL_CONSTRAINTS ac
+            JOIN ALL_CONS_COLUMNS cc ON ac.OWNER = cc.OWNER AND ac.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+            WHERE ac.OWNER = p_schema AND ac.TABLE_NAME = p_table AND ac.CONSTRAINT_TYPE = 'P'
+            ORDER BY cc.POSITION
+        ) LOOP
+            v_pk_cols := v_pk_cols || c.COLUMN_NAME || ',';
+        END LOOP;
+        IF v_pk_cols IS NOT NULL THEN
+            v_pk_cols := RTRIM(v_pk_cols, ',');
+            v_ddl := v_ddl || ',' || CHR(10) || '  CONSTRAINT PK_' || p_table || ' PRIMARY KEY (' || v_pk_cols || ')';
+        END IF;
+        -- FK: ссылка на родительскую таблицу (упрощённо — одна колонка)
+        FOR fk IN (
+            SELECT ac.CONSTRAINT_NAME, cc.COLUMN_NAME, ac.R_OWNER, ac.R_CONSTRAINT_NAME
+            FROM ALL_CONSTRAINTS ac
+            JOIN ALL_CONS_COLUMNS cc ON ac.OWNER = cc.OWNER AND ac.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+            WHERE ac.OWNER = p_schema AND ac.TABLE_NAME = p_table AND ac.CONSTRAINT_TYPE = 'R'
+            ORDER BY cc.POSITION
+        ) LOOP
+            DECLARE
+                v_ref_col VARCHAR2(128);
+                v_ref_tab VARCHAR2(128);
+            BEGIN
+                SELECT TABLE_NAME, COLUMN_NAME INTO v_ref_tab, v_ref_col FROM (
+                    SELECT c1.TABLE_NAME, c2.COLUMN_NAME
+                    FROM ALL_CONSTRAINTS c1
+                    JOIN ALL_CONS_COLUMNS c2 ON c1.OWNER = c2.OWNER AND c1.CONSTRAINT_NAME = c2.CONSTRAINT_NAME
+                    WHERE c1.OWNER = fk.R_OWNER AND c1.CONSTRAINT_NAME = fk.R_CONSTRAINT_NAME
+                    ORDER BY c2.POSITION
+                ) WHERE ROWNUM = 1;
+                v_ddl := v_ddl || ',' || CHR(10) || '  CONSTRAINT ' || fk.CONSTRAINT_NAME
+                    || ' FOREIGN KEY (' || fk.COLUMN_NAME || ') REFERENCES ' || fk.R_OWNER || '.' || v_ref_tab || '(' || v_ref_col || ')';
+            END;
+        END LOOP;
+        v_ddl := v_ddl || CHR(10) || ');' || CHR(10);
+        RETURN v_ddl;
+    END build_create_table_ddl;
+
 BEGIN
     out('-- ================================================');
     out('-- DDL-скрипт синхронизации: ' || v_dev_upper || ' -> ' || v_prod_upper);
@@ -407,74 +480,157 @@ BEGIN
     out('');
 
     --  Таблицы: CREATE для новых, ALTER для изменённых
+    --  Порядок вывода — топологическая сортировка по FK (родители перед детьми)
     out('-- ---- ТАБЛИЦЫ ----');
     out('');
 
-    FOR rec IN (
-        SELECT d.TABLE_NAME,
-               CASE WHEN p.TABLE_NAME IS NULL THEN 'CREATE' ELSE 'ALTER' END AS ACTION
-        FROM (SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER = v_dev_upper) d
-        LEFT JOIN (SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER = v_prod_upper) p
-          ON d.TABLE_NAME = p.TABLE_NAME
-        WHERE p.TABLE_NAME IS NULL
-           OR EXISTS (
-               SELECT 1 FROM (
-                   SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE
-                   FROM ALL_TAB_COLUMNS WHERE OWNER = v_dev_upper AND TABLE_NAME = d.TABLE_NAME
-                   MINUS
-                   SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE
-                   FROM ALL_TAB_COLUMNS WHERE OWNER = v_prod_upper AND TABLE_NAME = d.TABLE_NAME
-               ) diff
-           )
-        ORDER BY d.TABLE_NAME
-    ) LOOP
-        IF rec.ACTION = 'CREATE' THEN
-            out('-- CREATE TABLE ' || rec.TABLE_NAME);
-            v_ddl := get_ddl_safe('TABLE', rec.TABLE_NAME, v_dev_upper);
-            -- Заменяем схему Dev на Prod в DDL
-            v_ddl := REPLACE(v_ddl, '"' || v_dev_upper || '"', '"' || v_prod_upper || '"');
-            DBMS_OUTPUT.PUT_LINE(DBMS_LOB.SUBSTR(v_ddl, 32000, 1));
-        ELSE
-            out('-- ALTER TABLE ' || rec.TABLE_NAME || ' (добавление новых столбцов)');
-            -- Генерируем ALTER ADD для новых столбцов
-            FOR col IN (
-                SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH,
-                       DATA_PRECISION, DATA_SCALE, NULLABLE, DATA_DEFAULT
-                FROM ALL_TAB_COLUMNS
-                WHERE OWNER = v_dev_upper AND TABLE_NAME = rec.TABLE_NAME
-                  AND COLUMN_NAME NOT IN (
-                      SELECT COLUMN_NAME FROM ALL_TAB_COLUMNS
-                      WHERE OWNER = v_prod_upper AND TABLE_NAME = rec.TABLE_NAME
-                  )
-                ORDER BY COLUMN_ID
+    DECLARE
+        TYPE t_str_list   IS TABLE OF VARCHAR2(128);
+        TYPE t_action_tab IS TABLE OF VARCHAR2(10) INDEX BY VARCHAR2(128);
+        v_diff_tables t_str_list := t_str_list();
+        v_sorted      t_str_list := t_str_list();
+        v_edges       t_str_list := t_str_list();
+        v_in_sorted   t_action_tab;
+        v_action      t_action_tab;
+        v_changed     BOOLEAN;
+        v_can_add     BOOLEAN;
+        v_dep_found   BOOLEAN;
+        v_tname       VARCHAR2(128);
+        v_parent      VARCHAR2(128);
+        v_child       VARCHAR2(128);
+        v_delim       PLS_INTEGER;
+    BEGIN
+        -- Собрать список таблиц с отличиями и их действие (CREATE/ALTER)
+        FOR rec IN (
+            SELECT d.TABLE_NAME,
+                   CASE WHEN p.TABLE_NAME IS NULL THEN 'CREATE' ELSE 'ALTER' END AS ACTION
+            FROM (SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER = v_dev_upper) d
+            LEFT JOIN (SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER = v_prod_upper) p
+              ON d.TABLE_NAME = p.TABLE_NAME
+            WHERE p.TABLE_NAME IS NULL
+               OR EXISTS (
+                   SELECT 1 FROM (
+                       SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE
+                       FROM ALL_TAB_COLUMNS WHERE OWNER = v_dev_upper AND TABLE_NAME = d.TABLE_NAME
+                       MINUS
+                       SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE
+                       FROM ALL_TAB_COLUMNS WHERE OWNER = v_prod_upper AND TABLE_NAME = d.TABLE_NAME
+                   ) diff
+               )
+        ) LOOP
+            v_diff_tables.EXTEND;
+            v_diff_tables(v_diff_tables.LAST) := rec.TABLE_NAME;
+            v_action(rec.TABLE_NAME) := rec.ACTION;
+        END LOOP;
+
+        -- Рёбра FK: parent~child (ребёнок зависит от родителя)
+        FOR i IN 1..v_diff_tables.COUNT LOOP
+            FOR dep IN (
+                SELECT DISTINCT uc2.TABLE_NAME AS PARENT_TABLE
+                FROM ALL_CONSTRAINTS uc1
+                JOIN ALL_CONSTRAINTS uc2
+                  ON uc1.R_CONSTRAINT_NAME = uc2.CONSTRAINT_NAME
+                   AND uc1.R_OWNER        = uc2.OWNER
+                WHERE uc1.CONSTRAINT_TYPE = 'R'
+                  AND uc1.OWNER      = v_dev_upper
+                  AND uc1.TABLE_NAME = v_diff_tables(i)
+                  AND uc2.TABLE_NAME != v_diff_tables(i)
             ) LOOP
-                DECLARE
-                    v_col_def VARCHAR2(500);
-                BEGIN
-                    v_col_def := 'ALTER TABLE ' || v_prod_upper || '.' || rec.TABLE_NAME
-                        || ' ADD (' || col.COLUMN_NAME || ' ' || col.DATA_TYPE;
-                    IF col.DATA_TYPE IN ('VARCHAR2','CHAR','NVARCHAR2','NCHAR') THEN
-                        v_col_def := v_col_def || '(' || col.DATA_LENGTH || ')';
-                    ELSIF col.DATA_TYPE = 'NUMBER' AND col.DATA_PRECISION IS NOT NULL THEN
-                        v_col_def := v_col_def || '(' || col.DATA_PRECISION;
-                        IF col.DATA_SCALE IS NOT NULL THEN
-                            v_col_def := v_col_def || ',' || col.DATA_SCALE;
-                        END IF;
-                        v_col_def := v_col_def || ')';
-                    END IF;
-                    IF col.DATA_DEFAULT IS NOT NULL THEN
-                        v_col_def := v_col_def || ' DEFAULT ' || TRIM(col.DATA_DEFAULT);
-                    END IF;
-                    IF col.NULLABLE = 'N' THEN
-                        v_col_def := v_col_def || ' NOT NULL';
-                    END IF;
-                    v_col_def := v_col_def || ');';
-                    out(v_col_def);
-                END;
+                v_edges.EXTEND;
+                v_edges(v_edges.LAST) := dep.PARENT_TABLE || '~' || v_diff_tables(i);
             END LOOP;
-        END IF;
-        out('');
-    END LOOP;
+        END LOOP;
+
+        -- Топологическая сортировка (алгоритм Кана): родители перед детьми
+        v_changed := TRUE;
+        WHILE v_changed AND v_sorted.COUNT < v_diff_tables.COUNT LOOP
+            v_changed := FALSE;
+            FOR i IN 1..v_diff_tables.COUNT LOOP
+                IF NOT v_in_sorted.EXISTS(v_diff_tables(i)) THEN
+                    v_can_add := TRUE;
+                    FOR j IN 1..v_edges.COUNT LOOP
+                        v_delim := INSTR(v_edges(j), '~');
+                        v_parent := SUBSTR(v_edges(j), 1, v_delim - 1);
+                        v_child  := SUBSTR(v_edges(j), v_delim + 1);
+                        IF v_child = v_diff_tables(i) AND NOT v_in_sorted.EXISTS(v_parent) THEN
+                            v_dep_found := FALSE;
+                            FOR k IN 1..v_diff_tables.COUNT LOOP
+                                IF v_diff_tables(k) = v_parent THEN v_dep_found := TRUE; EXIT; END IF;
+                            END LOOP;
+                            IF v_dep_found THEN v_can_add := FALSE; END IF;
+                        END IF;
+                    END LOOP;
+                    IF v_can_add THEN
+                        v_sorted.EXTEND;
+                        v_sorted(v_sorted.LAST) := v_diff_tables(i);
+                        v_in_sorted(v_diff_tables(i)) := v_diff_tables(i);
+                        v_changed := TRUE;
+                    END IF;
+                END IF;
+            END LOOP;
+        END LOOP;
+
+        -- Таблицы, не попавшие в сортировку (циклы FK) — добавляем в конец
+        FOR i IN 1..v_diff_tables.COUNT LOOP
+            IF NOT v_in_sorted.EXISTS(v_diff_tables(i)) THEN
+                v_sorted.EXTEND;
+                v_sorted(v_sorted.LAST) := v_diff_tables(i);
+            END IF;
+        END LOOP;
+
+        -- Вывод DDL в порядке v_sorted
+        FOR i IN 1..v_sorted.COUNT LOOP
+            v_tname := v_sorted(i);
+            IF v_action(v_tname) = 'CREATE' THEN
+                out('-- CREATE TABLE ' || v_tname);
+                v_ddl := get_ddl_safe('TABLE', v_tname, v_dev_upper);
+                IF DBMS_LOB.SUBSTR(v_ddl, 50, 1) LIKE '-- Не удалось%' THEN
+                    v_ddl := build_create_table_ddl(v_tname, v_dev_upper);
+                END IF;
+                v_ddl := REPLACE(v_ddl, '"' || v_dev_upper || '"', '"' || v_prod_upper || '"');
+                v_ddl := REPLACE(v_ddl, v_dev_upper || '.', v_prod_upper || '.');
+                DBMS_OUTPUT.PUT_LINE(DBMS_LOB.SUBSTR(v_ddl, 32000, 1));
+            ELSE
+                out('-- ALTER TABLE ' || v_tname || ' (добавление новых столбцов)');
+                FOR col IN (
+                    SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH,
+                           DATA_PRECISION, DATA_SCALE, NULLABLE, DATA_DEFAULT
+                    FROM ALL_TAB_COLUMNS
+                    WHERE OWNER = v_dev_upper AND TABLE_NAME = v_tname
+                      AND COLUMN_NAME NOT IN (
+                          SELECT COLUMN_NAME FROM ALL_TAB_COLUMNS
+                          WHERE OWNER = v_prod_upper AND TABLE_NAME = v_tname
+                      )
+                    ORDER BY COLUMN_ID
+                ) LOOP
+                    DECLARE
+                        v_col_def VARCHAR2(500);
+                    BEGIN
+                        v_col_def := 'ALTER TABLE ' || v_prod_upper || '.' || v_tname
+                            || ' ADD (' || col.COLUMN_NAME || ' ' || col.DATA_TYPE;
+                        IF col.DATA_TYPE IN ('VARCHAR2','CHAR','NVARCHAR2','NCHAR') THEN
+                            v_col_def := v_col_def || '(' || col.DATA_LENGTH || ')';
+                        ELSIF col.DATA_TYPE = 'NUMBER' AND col.DATA_PRECISION IS NOT NULL THEN
+                            v_col_def := v_col_def || '(' || col.DATA_PRECISION;
+                            IF col.DATA_SCALE IS NOT NULL THEN
+                                v_col_def := v_col_def || ',' || col.DATA_SCALE;
+                            END IF;
+                            v_col_def := v_col_def || ')';
+                        END IF;
+                        IF col.DATA_DEFAULT IS NOT NULL THEN
+                            v_col_def := v_col_def || ' DEFAULT ' || TRIM(col.DATA_DEFAULT);
+                        END IF;
+                        IF col.NULLABLE = 'N' THEN
+                            v_col_def := v_col_def || ' NOT NULL';
+                        END IF;
+                        v_col_def := v_col_def || ');';
+                        out(v_col_def);
+                    END;
+                END LOOP;
+            END IF;
+            out('');
+        END LOOP;
+    END;
 
     --  Процедуры/Функции: CREATE OR REPLACE для изменённых
     out('-- ---- ПРОЦЕДУРЫ И ФУНКЦИИ ----');
@@ -579,8 +735,12 @@ BEGIN
             out('DROP INDEX ' || v_prod_upper || '.' || rec.INDEX_NAME || ';');
         END IF;
         v_ddl := get_ddl_safe('INDEX', rec.INDEX_NAME, v_dev_upper);
-        v_ddl := REPLACE(v_ddl, '"' || v_dev_upper || '"', '"' || v_prod_upper || '"');
-        DBMS_OUTPUT.PUT_LINE(DBMS_LOB.SUBSTR(v_ddl, 32000, 1));
+        IF DBMS_LOB.SUBSTR(v_ddl, 50, 1) LIKE '-- Не удалось%' THEN
+            out('-- Индекс ' || rec.INDEX_NAME || ' (on ' || rec.TABLE_NAME || ') создаётся вместе с таблицей (PK/UK) или недоступен для экспорта.');
+        ELSE
+            v_ddl := REPLACE(v_ddl, '"' || v_dev_upper || '"', '"' || v_prod_upper || '"');
+            DBMS_OUTPUT.PUT_LINE(DBMS_LOB.SUBSTR(v_ddl, 32000, 1));
+        END IF;
         out('');
     END LOOP;
 

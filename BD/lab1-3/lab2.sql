@@ -3,7 +3,7 @@
 BEGIN
     FOR t IN (SELECT trigger_name FROM user_triggers
               WHERE trigger_name IN (
-                  'TRG_UPDATE_GROUP_CVAL','TRG_STUDENTS_AUDIT',
+                  'TRG_GROUPS_CVAL_AFTER_STMT','TRG_UPDATE_GROUP_CVAL_STMT','TRG_UPDATE_GROUP_CVAL','TRG_STUDENTS_AUDIT',
                   'TRG_STUDENTS_FK_CHECK','TRG_STUDENTS_UNIQUE_ID',
                   'TRG_STUDENTS_AUTOINC','TRG_GROUPS_CASCADE_DELETE',
                   'TRG_GROUPS_UNIQUE_NAME','TRG_GROUPS_UNIQUE_ID',
@@ -268,38 +268,86 @@ END restore_students;
 
 -- Задание 6: Триггер обновления C_VAL в GROUPS
 -- при изменении данных в STUDENTS
+--
+-- Чтобы избежать ORA-04091 (mutating table) при каскадном удалении
+-- (DELETE FROM GROUPS -> trg_groups_cascade_delete -> DELETE FROM STUDENTS ->
+--  trg_update_group_cval пытается UPDATE GROUPS), обновление C_VAL перенесено
+--  в AFTER STATEMENT: в FOR EACH ROW только накапливаем дельты в пакете.
+
+CREATE OR REPLACE PACKAGE pkg_group_cval AS
+    TYPE t_group_delta IS TABLE OF NUMBER INDEX BY PLS_INTEGER;  -- group_id -> delta
+    g_deltas t_group_delta;
+    PROCEDURE add_delta(p_group_id NUMBER, p_delta NUMBER);
+    PROCEDURE apply_deltas;
+END pkg_group_cval;
+/
+CREATE OR REPLACE PACKAGE BODY pkg_group_cval AS
+    PROCEDURE add_delta(p_group_id NUMBER, p_delta NUMBER) IS
+    BEGIN
+        IF NOT g_deltas.EXISTS(p_group_id) THEN
+            g_deltas(p_group_id) := 0;
+        END IF;
+        g_deltas(p_group_id) := g_deltas(p_group_id) + p_delta;
+    END add_delta;
+
+    PROCEDURE apply_deltas IS
+        v_group_id NUMBER;
+    BEGIN
+        v_group_id := g_deltas.FIRST;
+        WHILE v_group_id IS NOT NULL LOOP
+            UPDATE GROUPS
+            SET C_VAL = GREATEST(C_VAL + g_deltas(v_group_id), 0)
+            WHERE ID = v_group_id;
+            v_group_id := g_deltas.NEXT(v_group_id);
+        END LOOP;
+        g_deltas.DELETE;
+    END apply_deltas;
+END pkg_group_cval;
+/
+
 CREATE OR REPLACE TRIGGER trg_update_group_cval
 AFTER INSERT OR UPDATE OF GROUP_ID OR DELETE ON STUDENTS
 FOR EACH ROW
 BEGIN
     IF INSERTING THEN
-        UPDATE GROUPS
-        SET C_VAL = C_VAL + 1
-        WHERE ID = :NEW.GROUP_ID;
-
+        pkg_group_cval.add_delta(:NEW.GROUP_ID, 1);
     ELSIF DELETING THEN
-        UPDATE GROUPS
-        SET C_VAL = GREATEST(C_VAL - 1, 0)
-        WHERE ID = :OLD.GROUP_ID;
-
-    ELSIF UPDATING THEN
-        -- Если студент сменил группу
-        IF :OLD.GROUP_ID != :NEW.GROUP_ID THEN
-            UPDATE GROUPS
-            SET C_VAL = GREATEST(C_VAL - 1, 0)
-            WHERE ID = :OLD.GROUP_ID;
-
-            UPDATE GROUPS
-            SET C_VAL = C_VAL + 1
-            WHERE ID = :NEW.GROUP_ID;
-        END IF;
+        pkg_group_cval.add_delta(:OLD.GROUP_ID, -1);
+    ELSIF UPDATING AND :OLD.GROUP_ID != :NEW.GROUP_ID THEN
+        pkg_group_cval.add_delta(:OLD.GROUP_ID, -1);
+        pkg_group_cval.add_delta(:NEW.GROUP_ID, 1);
     END IF;
 END trg_update_group_cval;
 /
 
--- ============================================================
--- ТЕСТИРОВАНИЕ ТРИГГЕРОВ
--- ============================================================
+-- Применяем дельты после DML по STUDENTS (для обычного INSERT/UPDATE/DELETE по студентам).
+-- При каскадном DELETE из GROUPS таблица GROUPS мутирует -> ORA-04091, ловим и не падаем;
+-- тогда дельты применит TRG_GROUPS_CVAL_AFTER_STMT после завершения DELETE FROM GROUPS.
+CREATE OR REPLACE TRIGGER trg_update_group_cval_stmt
+AFTER INSERT OR UPDATE OF GROUP_ID OR DELETE ON STUDENTS
+BEGIN
+    BEGIN
+        pkg_group_cval.apply_deltas;
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLCODE = -4091 THEN  -- ORA-04091: mutating table
+                NULL;  -- применит триггер на GROUPS после завершения операций по GROUPS
+            ELSE
+                RAISE;
+            END IF;
+    END;
+END trg_update_group_cval_stmt;
+/
+
+-- Применяем накопленные дельты C_VAL после операций по GROUPS (в т.ч. после каскадного DELETE).
+CREATE OR REPLACE TRIGGER trg_groups_cval_after_stmt
+AFTER INSERT OR UPDATE OR DELETE ON GROUPS
+FOR EACH STATEMENT
+BEGIN
+    pkg_group_cval.apply_deltas;
+END trg_groups_cval_after_stmt;
+/
+
 
 -- ------------------------------------------------------------
 -- Триггер: trg_groups_autoinc  (автоинкремент ID у GROUPS)
@@ -406,9 +454,7 @@ END;
 /
 SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
 
--- ------------------------------------------------------------
 -- Триггер: trg_update_group_cval при DELETE
--- ------------------------------------------------------------
 BEGIN
     DBMS_OUTPUT.PUT_LINE('');
     DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_update_group_cval при DELETE');
