@@ -20,7 +20,7 @@ sys.path.insert(0, str(MOUI_ROOT))
 from lab1.matrix import invert_matrix_with_replaced_column
 
 
-def simplex_main_phase(c, A, x, B, verbose=True):
+def simplex_main_phase(c, A, x, B, verbose=True, return_basis=False):
     """
     Основная фаза симплекс-метода.
 
@@ -31,9 +31,10 @@ def simplex_main_phase(c, A, x, B, verbose=True):
         B : list of int — упорядоченный список базисных индексов (индексы от 0 до n-1)
 
     Выход:
-        (status, x_opt) где:
+        По умолчанию: (status, x_opt), где:
             status == 'optimal' и x_opt — оптимальный план
             status == 'unbounded' — целевой функционал не ограничен сверху
+        Если return_basis=True: (status, x_opt, B_opt)
     """
     c = np.asarray(c, dtype=float).flatten()
     A = np.asarray(A, dtype=float)
@@ -55,6 +56,12 @@ def simplex_main_phase(c, A, x, B, verbose=True):
             print(f"Базис B = {[b + 1 for b in B]} (индексы 1..n)")
             print(f"План x = {x}")
             print(f"Значение целевой функции c^T x = {c @ x:.4f}")
+            print("Матрица A:")
+            print(A)
+            print("Базисная матрица A_B:")
+            print(A_B)
+            print("Обратная матрица A_B^{-1}:")
+            print(A_B_inv)
 
         # ШАГ 2: вектор c_B
         c_B = c[B]
@@ -72,6 +79,8 @@ def simplex_main_phase(c, A, x, B, verbose=True):
         if np.all(delta <= 1e-10):  # с учётом численной погрешности
             if verbose:
                 print("Δ ≤ 0 → текущий план оптимален.")
+            if return_basis:
+                return 'optimal', x.copy(), B.copy()
             return 'optimal', x.copy()
 
         # ШАГ 6: первая положительная компонента в Δ (индекс вводимой переменной j0)
@@ -81,6 +90,8 @@ def simplex_main_phase(c, A, x, B, verbose=True):
                 j0 = j
                 break
         if j0 is None:
+            if return_basis:
+                return 'optimal', x.copy(), B.copy()
             return 'optimal', x.copy()
 
         if verbose:
@@ -102,11 +113,13 @@ def simplex_main_phase(c, A, x, B, verbose=True):
 
         # ШАГ 9: θ0 = min θ_i
         theta0 = np.min(theta)
-
+        print(theta)
         # ШАГ 10: неограниченность
         if np.isinf(theta0) or theta0 >= 1e15:
             if verbose:
                 print("θ0 = ∞ → целевой функционал не ограничен сверху на множестве допустимых планов.")
+            if return_basis:
+                return 'unbounded', None, B.copy()
             return 'unbounded', None
 
         # ШАГ 11: индекс k, на котором достигается минимум (при равенстве — минимальный)

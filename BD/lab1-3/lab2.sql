@@ -1,4 +1,3 @@
--- Лабораторная работа 2: Триггеры
 
 BEGIN
     FOR t IN (SELECT trigger_name FROM user_triggers
@@ -43,7 +42,6 @@ CREATE SEQUENCE SEQ_STUDENTS_ID START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
 -- Задание 2: Триггеры — уникальность ID, автоинкремент,
 --            уникальность GROUPS.NAME
 
--- Автоинкремент ID для GROUPS
 CREATE OR REPLACE TRIGGER trg_groups_autoinc
 BEFORE INSERT ON GROUPS
 FOR EACH ROW
@@ -238,7 +236,6 @@ BEGIN
                     AND CHANGED_AT <= v_restore_time
               );
 
-            -- Если последняя операция не DELETE — восстанавливаем запись
             IF v_last_op != 'DELETE' THEN
                 INSERT INTO STUDENTS (ID, NAME, GROUP_ID)
                 VALUES (rec.STUDENT_ID, v_last_name, v_last_grp);
@@ -252,7 +249,6 @@ BEGIN
 
     COMMIT;
 
-    -- Включаем триггер обратно
     EXECUTE IMMEDIATE 'ALTER TRIGGER trg_students_audit ENABLE';
 
     DBMS_OUTPUT.PUT_LINE('Восстановлено записей: ' || v_count_restored);
@@ -266,17 +262,14 @@ EXCEPTION
 END restore_students;
 /
 
--- Задание 6: Триггер обновления C_VAL в GROUPS
--- при изменении данных в STUDENTS
---
--- Чтобы избежать ORA-04091 (mutating table) при каскадном удалении
--- (DELETE FROM GROUPS -> trg_groups_cascade_delete -> DELETE FROM STUDENTS ->
---  trg_update_group_cval пытается UPDATE GROUPS), обновление C_VAL перенесено
---  в AFTER STATEMENT: в FOR EACH ROW только накапливаем дельты в пакете.
+-- Задание 6: обновление GROUPS.C_VAL при изменениях в STUDENTS.
+--   - ORA-00036: рекурсия, т.к. apply_deltas делает UPDATE GROUPS, а значит срабатывает trg_groups_cval_after_stmt
+--     -> исправлено добавлением защиты `g_is_applying_deltas` в pkg_group_cval.apply_deltas.
 
 CREATE OR REPLACE PACKAGE pkg_group_cval AS
     TYPE t_group_delta IS TABLE OF NUMBER INDEX BY PLS_INTEGER;  -- group_id -> delta
     g_deltas t_group_delta;
+    g_is_applying_deltas BOOLEAN := FALSE;
     PROCEDURE add_delta(p_group_id NUMBER, p_delta NUMBER);
     PROCEDURE apply_deltas;
 END pkg_group_cval;
@@ -293,14 +286,27 @@ CREATE OR REPLACE PACKAGE BODY pkg_group_cval AS
     PROCEDURE apply_deltas IS
         v_group_id NUMBER;
     BEGIN
+        IF g_is_applying_deltas THEN
+            RETURN;
+        END IF;
+        g_is_applying_deltas := TRUE;
+
         v_group_id := g_deltas.FIRST;
-        WHILE v_group_id IS NOT NULL LOOP
-            UPDATE GROUPS
-            SET C_VAL = GREATEST(C_VAL + g_deltas(v_group_id), 0)
-            WHERE ID = v_group_id;
-            v_group_id := g_deltas.NEXT(v_group_id);
-        END LOOP;
-        g_deltas.DELETE;
+        BEGIN
+            WHILE v_group_id IS NOT NULL LOOP
+                UPDATE GROUPS
+                SET C_VAL = GREATEST(C_VAL + g_deltas(v_group_id), 0)
+                WHERE ID = v_group_id;
+                v_group_id := g_deltas.NEXT(v_group_id);
+            END LOOP;
+            g_deltas.DELETE;
+        EXCEPTION
+            WHEN OTHERS THEN
+                g_is_applying_deltas := FALSE;
+                RAISE;
+        END;
+
+        g_is_applying_deltas := FALSE;
     END apply_deltas;
 END pkg_group_cval;
 /
@@ -320,9 +326,7 @@ BEGIN
 END trg_update_group_cval;
 /
 
--- Применяем дельты после DML по STUDENTS (для обычного INSERT/UPDATE/DELETE по студентам).
--- При каскадном DELETE из GROUPS таблица GROUPS мутирует -> ORA-04091, ловим и не падаем;
--- тогда дельты применит TRG_GROUPS_CVAL_AFTER_STMT после завершения DELETE FROM GROUPS.
+
 CREATE OR REPLACE TRIGGER trg_update_group_cval_stmt
 AFTER INSERT OR UPDATE OF GROUP_ID OR DELETE ON STUDENTS
 BEGIN
@@ -330,8 +334,8 @@ BEGIN
         pkg_group_cval.apply_deltas;
     EXCEPTION
         WHEN OTHERS THEN
-            IF SQLCODE = -4091 THEN  -- ORA-04091: mutating table
-                NULL;  -- применит триггер на GROUPS после завершения операций по GROUPS
+            IF SQLCODE = -4091 THEN 
+                NULL;  
             ELSE
                 RAISE;
             END IF;
@@ -339,145 +343,105 @@ BEGIN
 END trg_update_group_cval_stmt;
 /
 
--- Применяем накопленные дельты C_VAL после операций по GROUPS (в т.ч. после каскадного DELETE).
 CREATE OR REPLACE TRIGGER trg_groups_cval_after_stmt
 AFTER INSERT OR UPDATE OR DELETE ON GROUPS
-FOR EACH STATEMENT
 BEGIN
     pkg_group_cval.apply_deltas;
 END trg_groups_cval_after_stmt;
 /
 
 
--- ------------------------------------------------------------
--- Триггер: trg_groups_autoinc  (автоинкремент ID у GROUPS)
--- Триггер: trg_groups_unique_name (уникальность NAME у GROUPS)
--- ------------------------------------------------------------
 BEGIN
-    DBMS_OUTPUT.PUT_LINE('');
-    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_groups_autoinc');
-    DBMS_OUTPUT.PUT_LINE('  INSERT без указания ID — ID назначается автоматически');
+    NULL;
 END;
 /
+SELECT '' AS msg FROM dual;
+SELECT '  ТРИГГЕР: trg_groups_autoinc' AS msg FROM dual;
+SELECT '  INSERT без указания ID — ID назначается автоматически' AS msg FROM dual;
 INSERT INTO GROUPS (NAME, C_VAL) VALUES ('ПМ-21', 0);
 INSERT INTO GROUPS (NAME, C_VAL) VALUES ('ПМ-22', 0);
 
--- Показываем назначенные ID
 SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
 
+SELECT '' AS msg FROM dual;
+SELECT '  ТРИГГЕР: trg_groups_unique_name' AS msg FROM dual;
+SELECT '  Попытка вставить дубликат имени "ПМ-21":' AS msg FROM dual;
 BEGIN
-    DBMS_OUTPUT.PUT_LINE('');
-    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_groups_unique_name');
-    DBMS_OUTPUT.PUT_LINE('  Попытка вставить дубликат имени "ПМ-21":');
     INSERT INTO GROUPS (NAME) VALUES ('ПМ-21');
 EXCEPTION
     WHEN OTHERS THEN
-        DBMS_OUTPUT.PUT_LINE('  [ОЖИДАЕМАЯ ОШИБКА] ' || SQLERRM);
+        NULL;
 END;
 /
 
--- ------------------------------------------------------------
--- Триггер: trg_students_autoinc  (автоинкремент ID у STUDENTS)
--- Триггер: trg_students_fk_check (FK: GROUP_ID должен существовать)
--- Триггер: trg_update_group_cval (C_VAL обновляется при INSERT)
--- ------------------------------------------------------------
-BEGIN
-    DBMS_OUTPUT.PUT_LINE('');
-    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_students_autoinc + trg_update_group_cval');
-    DBMS_OUTPUT.PUT_LINE('  Добавляем студентов — C_VAL в GROUPS должен расти');
-    DBMS_OUTPUT.PUT_LINE('  C_VAL до добавления студентов:');
-END;
-/
+
+SELECT '' AS msg FROM dual;
+SELECT '  ТРИГГЕР: trg_students_autoinc + trg_update_group_cval' AS msg FROM dual;
+SELECT '  Добавляем студентов — C_VAL в GROUPS должен расти' AS msg FROM dual;
+SELECT '  C_VAL до добавления студентов:' AS msg FROM dual;
 SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
 
 INSERT INTO STUDENTS (NAME, GROUP_ID) VALUES ('Иванов Иван', 1);
-BEGIN
-    DBMS_OUTPUT.PUT_LINE('  [trg_update_group_cval] INSERT Иванов Иван -> ПМ-21');
-    DBMS_OUTPUT.PUT_LINE('  C_VAL после добавления Иванов Иван:');
-END;
-/
+SELECT '  [trg_update_group_cval] INSERT Иванов Иван -> ПМ-21' AS msg FROM dual;
+SELECT '  C_VAL после добавления Иванов Иван:' AS msg FROM dual;
 SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
 
 INSERT INTO STUDENTS (NAME, GROUP_ID) VALUES ('Петров Пётр', 1);
-BEGIN
-    DBMS_OUTPUT.PUT_LINE('  [trg_update_group_cval] INSERT Петров Пётр -> ПМ-21');
-    DBMS_OUTPUT.PUT_LINE('  C_VAL после добавления Петров Пётр:');
-END;
-/
+SELECT '  [trg_update_group_cval] INSERT Петров Пётр -> ПМ-21' AS msg FROM dual;
+SELECT '  C_VAL после добавления Петров Пётр:' AS msg FROM dual;
 SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
 
 INSERT INTO STUDENTS (NAME, GROUP_ID) VALUES ('Сидоров Семён', 2);
-BEGIN
-    DBMS_OUTPUT.PUT_LINE('  [trg_update_group_cval] INSERT Сидоров Семён -> ПМ-22');
-    DBMS_OUTPUT.PUT_LINE('  C_VAL после добавления Сидоров Семён:');
-END;
-/
+SELECT '  [trg_update_group_cval] INSERT Сидоров Семён -> ПМ-22' AS msg FROM dual;
+SELECT '  C_VAL после добавления Сидоров Семён:' AS msg FROM dual;
 SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
 
--- Таблица студентов
-BEGIN
-    DBMS_OUTPUT.PUT_LINE('  Итоговый список студентов (ID назначены автоматически):');
-END;
-/
+SELECT '  Итоговый список студентов (ID назначены автоматически):' AS msg FROM dual;
 SELECT S.ID, S.NAME, S.GROUP_ID, G.NAME AS GROUP_NAME
 FROM STUDENTS S
 JOIN GROUPS G ON S.GROUP_ID = G.ID
 ORDER BY S.ID;
 
 BEGIN
-    DBMS_OUTPUT.PUT_LINE('');
-    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_students_fk_check');
-    DBMS_OUTPUT.PUT_LINE('  Попытка добавить студента в несуществующую группу ID=99:');
     INSERT INTO STUDENTS (NAME, GROUP_ID) VALUES ('Тестов Тест', 99);
 EXCEPTION
     WHEN OTHERS THEN
-        DBMS_OUTPUT.PUT_LINE('  [ОЖИДАЕМАЯ ОШИБКА] ' || SQLERRM);
+        NULL;
 END;
 /
+SELECT '' AS msg FROM dual;
+SELECT '  ТРИГГЕР: trg_students_fk_check' AS msg FROM dual;
+SELECT '  Попытка добавить студента в несуществующую группу ID=99:' AS msg FROM dual;
 
--- ------------------------------------------------------------
--- Триггер: trg_update_group_cval при UPDATE (смена группы)
--- Триггер: trg_students_audit (журнал)
--- ------------------------------------------------------------
+
 BEGIN
-    DBMS_OUTPUT.PUT_LINE('');
-    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_update_group_cval при UPDATE GROUP_ID');
-    DBMS_OUTPUT.PUT_LINE('  Переводим Иванов Иван из ПМ-21 (ID=1) в ПМ-22 (ID=2)');
-    DBMS_OUTPUT.PUT_LINE('  C_VAL ДО перевода: ПМ-21 должна быть 2, ПМ-22 = 1');
+    NULL;
 END;
 /
-UPDATE STUDENTS SET GROUP_ID = 2 WHERE NAME = 'Иванов Иван';
-BEGIN
-    DBMS_OUTPUT.PUT_LINE('  [trg_update_group_cval] ПМ-21.C_VAL -= 1, ПМ-22.C_VAL += 1');
-    DBMS_OUTPUT.PUT_LINE('  C_VAL ПОСЛЕ перевода:');
-END;
-/
+SELECT '' AS msg FROM dual;
+SELECT '  ТРИГГЕР: trg_update_group_cval при UPDATE GROUP_ID' AS msg FROM dual;
+SELECT '  Переводим Иванов Иван из ПМ-21 (ID=1) в ПМ-22 (ID=2)' AS msg FROM dual;
+SELECT '  C_VAL ДО перевода: ПМ-21 должна быть 2, ПМ-22 = 1' AS msg FROM dual;
+UPDATE STUDENTSOU SET GRP_ID = 2 WHERE NAME = 'Иванов Иван';
+SELECT '  [trg_update_group_cval] ПМ-21.C_VAL -= 1, ПМ-22.C_VAL += 1' AS msg FROM dual;
+SELECT '  C_VAL ПОСЛЕ перевода:' AS msg FROM dual;
 SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
 
--- Триггер: trg_update_group_cval при DELETE
-BEGIN
-    DBMS_OUTPUT.PUT_LINE('');
-    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_update_group_cval при DELETE');
-    DBMS_OUTPUT.PUT_LINE('  Удаляем Петров Пётр из ПМ-21');
-    DBMS_OUTPUT.PUT_LINE('  C_VAL ДО удаления:');
-END;
-/
+SELECT '' AS msg FROM dual;
+SELECT '  ТРИГГЕР: trg_update_group_cval при DELETE' AS msg FROM dual;
+SELECT '  Удаляем Петров Пётр из ПМ-21' AS msg FROM dual;
+SELECT '  C_VAL ДО удаления:' AS msg FROM dual;
 DELETE FROM STUDENTS WHERE NAME = 'Петров Пётр';
-BEGIN
-    DBMS_OUTPUT.PUT_LINE('  [trg_update_group_cval] ПМ-21.C_VAL -= 1');
-    DBMS_OUTPUT.PUT_LINE('  C_VAL ПОСЛЕ удаления:');
-END;
-/
+SELECT '  [trg_update_group_cval] ПМ-21.C_VAL -= 1' AS msg FROM dual;
+SELECT '  C_VAL ПОСЛЕ удаления:' AS msg FROM dual;
 SELECT ID, NAME, C_VAL FROM GROUPS ORDER BY ID;
 
--- ------------------------------------------------------------
--- Журнал аудита (trg_students_audit)
--- ------------------------------------------------------------
 BEGIN
-    DBMS_OUTPUT.PUT_LINE('');
-    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_students_audit — журнал всех операций');
+    NULL;
 END;
 /
+SELECT '' AS msg FROM dual;
+SELECT '  ТРИГГЕР: trg_students_audit — журнал всех операций' AS msg FROM dual;
 SELECT
     LOG_ID,
     OPERATION,
@@ -490,29 +454,28 @@ SELECT
 FROM STUDENTS_LOG
 ORDER BY LOG_ID;
 
--- ------------------------------------------------------------
--- Триггер: trg_groups_cascade_delete
--- ------------------------------------------------------------
 BEGIN
-    DBMS_OUTPUT.PUT_LINE('');
-    DBMS_OUTPUT.PUT_LINE('  ТРИГГЕР: trg_groups_cascade_delete');
-    DBMS_OUTPUT.PUT_LINE('  Удаляем группу ПМ-22 — студенты должны удалиться каскадно');
-    DBMS_OUTPUT.PUT_LINE('  Студенты ПМ-22 ДО удаления группы:');
+    NULL;
 END;
 /
+SELECT '' AS msg FROM dual;
+SELECT '  ТРИГГЕР: trg_groups_cascade_delete' AS msg FROM dual;
+SELECT '  Удаляем группу ПМ-22 — студенты должны удалиться каскадно' AS msg FROM dual;
+SELECT '  Студенты ПМ-22 ДО удаления группы:' AS msg FROM dual;
 SELECT S.ID, S.NAME FROM STUDENTS S WHERE S.GROUP_ID = 2;
 DELETE FROM GROUPS WHERE NAME = 'ПМ-22';
 BEGIN
-    DBMS_OUTPUT.PUT_LINE('  Студенты ПОСЛЕ удаления группы ПМ-22 (ожидается 0 строк):');
+    NULL;
 END;
 /
+SELECT '  Студенты ПОСЛЕ удаления группы ПМ-22 (ожидается 0 строк):' AS msg FROM dual;
 SELECT S.ID, S.NAME FROM STUDENTS S WHERE S.GROUP_ID = 2;
 
--- Итоговый журнал (включая удалённых при каскаде)
 BEGIN
-    DBMS_OUTPUT.PUT_LINE('  Итоговый журнал (включая каскадные DELETE):');
+    NULL;
 END;
 /
+SELECT '  Итоговый журнал (включая каскадные DELETE):' AS msg FROM dual;
 SELECT
     LOG_ID,
     OPERATION,

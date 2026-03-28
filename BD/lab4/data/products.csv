@@ -1,0 +1,7 @@
+product_id,category_id,name,price,rating
+100,10,ThinkPro X,1200,4.7
+101,10,AirBook 14,980,4.5
+200,20,Photon One,650,4.6
+201,20,Nova Max,790,4.4
+300,30,Wireless Mouse,45,4.3
+301,30,USB-C Hub,65,4.2
